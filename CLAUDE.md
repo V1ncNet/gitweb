@@ -1,0 +1,96 @@
+# CLAUDE.md
+
+Guidance for coding agents working in this repository. The README covers what the image is and how to use it.
+
+## Layout
+
+| Path | Purpose |
+|-|-|
+| `Dockerfile` | Alpine with `git-gitweb`, `highlight`, `lighttpd` and `perl-cgi`. Creates user `git` (1001:1001) and patches `gitweb.cgi` |
+| `lighttpd.conf` | Serves `gitweb.cgi` as CGI on port 8080 and static files from the document root `/usr/share/gitweb`, logs to `stderr` |
+| `gitweb.conf` | Installed as `/etc/gitweb.conf`, which gitweb reads by default. Sets project root, neutral site name, stylesheet, `$prevent_xss` and features, then loads the optional site file |
+| `static/theme.css` | Installed as `/usr/share/gitweb/static/theme.css`, served at `/static/theme.css`. Empty until the theme is written |
+| `tests/smoke.sh` | Starts the image like the pod does, without and with a site file, and checks pages of two bare repositories over HTTP |
+| `.github/workflows/deploy.yml` | Smoke test, release and push to Docker Hub, zizmor and dependency review on pull requests |
+| `.github/workflows/scan.yml` | Daily Trivy scan of `vinado/gitweb:1` |
+| `.github/dependabot.yml` | Weekly updates of Docker and actions with seven days of cooldown |
+
+## Testing locally
+
+```sh
+docker build --platform linux/arm64 -t local/gw:test .
+tests/smoke.sh local/gw:test
+nix shell nixpkgs#zizmor --command zizmor .github/workflows/
+```
+
+The image exists for `linux/arm64` only. `smoke.sh` listens on port `28080`, override it with `SMOKE_PORT`. Fetch
+missing tools ad hoc with `nix shell nixpkgs#<tool>`.
+
+## Runtime constraints
+
+- The container runs as UID and GID `1001` with a read-only root filesystem and no capabilities. Only `/tmp` is
+  writable.
+- `lighttpd` listens on port `8080`. The repositories are mounted read-only at `/srv/repositories`.
+- The image has no authentication. A login proxy in front of it provides that.
+
+## Why things are as they are
+
+- `gitweb` joins the base URL and the project with a `/`. `git@example.org:` plus `team/x.git` would become the
+  absolute path `git@example.org:/team/x.git`. The `Dockerfile` therefore rewrites `map { "$_/$project" }` in
+  `gitweb.cgi` to `map { "$_$project" }`, and the build fails if the pattern no longer matches. The smoke test asserts
+  the resulting clone link.
+- The base URL `git@example.org:~` would clone, but `git-lfs-transfer` does not resolve `~`, so `git lfs pull` fails.
+  `cloneurl` files are out, because they would live on the repositories volume.
+- The features `snapshot`, `pickaxe`, `grep` and `blame` are switched off explicitly, because Alpine's `gitweb.cgi`
+  enables `snapshot`, `pickaxe` and `grep` by default. That shrinks the attack surface behind the login. The smoke test
+  expects status 403 for each of them.
+- `$prevent_xss = 1` makes `blob_plain` send repository HTML and SVG as plain text instead of rendering it inline.
+  The image has no `/etc/mime.types`, so gitweb would fall back to `text/plain` even without the setting. The smoke
+  test therefore mounts a `mime.types` that maps `html` to `text/html`, requests an HTML file through `blob_plain` and
+  expects `text/plain` or an attachment. With `$prevent_xss = 0` the same request returns `text/html` and fails.
+- The page loads nothing from other hosts. `avatar` is off to avoid Gravatar, and `$logo_url` points to `/`, so no link
+  leaves the site either. The smoke test checks for absolute URLs.
+- User `git` has the same UID as the owner of the repositories. Git otherwise rejects them as "dubious ownership".
+- `static/theme.css` is empty on purpose. A later change fills it. `gitweb.conf` already links it.
+
+## Site file
+
+- The image contains no deployment details. `gitweb.conf` sets the site name "gitweb" and no clone URL base, so
+  without a site file the summary page shows no clone link.
+- `gitweb.conf` ends by evaluating `/etc/gitweb.d/site.conf` with Perl's `do` if the file exists. It can set or
+  override any gitweb variable, typically `$site_name` and `@git_base_url_list`. In Kubernetes a ConfigMap is mounted
+  there.
+- A syntax error or an unreadable file makes gitweb show its page "500 - Internal Server Error" with the Perl message
+  instead of serving the defaults silently. gitweb still answers with HTTP status 200, so the deployment has to catch
+  a broken file itself, for example with `perl -c` on the ConfigMap or an exec probe that greps the page.
+- gitweb's `read_config_file` dies on a set `$!` after evaluating `/etc/gitweb.conf`, before it looks at `$@`. The `-e`
+  test leaves `ENOENT` in `$!` when the file is missing, and `do` can leave a stale value. `gitweb.conf` therefore
+  collects the error first, resets `$!` and only then dies, so the message naming the site file comes through.
+- `tests/smoke.sh` checks the default site name and the missing clone link without a site file. With a broken site
+  file it expects the error page and the file name. With its own valid site file it checks the site name and the exact
+  clone link `git@example.org:team/nested.git`.
+
+## Releases
+
+- Every push to `main` releases the next patch version. The label `release:minor` or `release:major` on the merged
+  pull request raises that part and resets the lower ones to 0.
+- Pushes that only touch `README.md`, `.github/workflows/scan.yml` or `.github/dependabot.yml` do not release (the
+  `paths-ignore` of `deploy.yml`). Every other push to `main` does, including pushes that only touch `CLAUDE.md` or
+  `tests/`.
+- `deploy.yml` looks up the pull request of the pushed commit and retries up to five times while GitHub has not linked
+  it yet. An API error fails the step. Without a pull request the release is a patch.
+- The workflow pushes `vinado/gitweb` with the tags `<major>`, `<major>.<minor>`, `<version>` and `latest`, then tags
+  the commit `v<version>`. `latest` comes from the default flavor `latest=auto` of the docker metadata action, which
+  also omits the `<major>` tag while the major version is 0. The first pull request carries `release:major`, so
+  `v1.0.0` and the tag `1` exist when `scan.yml` reaches `main`.
+- `scan.yml` fails on fixable high or critical findings and starts `deploy.yml` by `workflow_dispatch`, which rebuilds
+  the latest tag with fixed Alpine packages. A scan error fails the run without a rebuild. The `follow-up` job
+  re-enables `scan.yml` on every run, so GitHub does not disable it after 60 days without commits. It needs
+  `actions: write` for that.
+
+## Conventions
+
+- Commit messages follow the seven rules by Chris Beams and are written in English.
+- Workflows pin actions to a commit with the version in a trailing comment and must pass zizmor. Values reach `run:`
+  through `env:`, never through `${{ }}`.
+- Images are pinned by tag and digest in the `Dockerfile`.
