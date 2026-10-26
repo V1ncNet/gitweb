@@ -26,3 +26,7 @@ The image is built for `linux/arm64`.
 
 Every push to `main` publishes a new patch version to Docker Hub as `vinado/gitweb`. Labelling the merged pull request
 with `release:minor` or `release:major` raises that part of the version instead.
+
+## License
+
+[MIT](LICENSE)
