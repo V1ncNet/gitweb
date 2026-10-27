@@ -9,8 +9,9 @@ Guidance for coding agents working in this repository. The README covers what th
 | `Dockerfile` | Alpine with `git-gitweb`, `highlight`, `lighttpd` and `perl-cgi`. Creates user `git` (1001:1001) and patches `gitweb.cgi` |
 | `lighttpd.conf` | Serves `gitweb.cgi` as CGI on port 8080 and static files from the document root `/usr/share/gitweb`, logs to `stderr` |
 | `gitweb.conf` | Installed as `/etc/gitweb.conf`, which gitweb reads by default. Sets project root, neutral site name, stylesheet, `$prevent_xss` and features, then loads the optional site file |
-| `static/theme.css` | Installed as `/usr/share/gitweb/static/theme.css`, served at `/static/theme.css`. Empty until the theme is written |
+| `static/theme.css` | Installed as `/usr/share/gitweb/static/theme.css`, served at `/static/theme.css`. Layout for phones and desktop plus dark mode on top of gitweb's own stylesheet |
 | `tests/smoke.sh` | Starts the image like the pod does, without and with a site file, and checks pages of two bare repositories over HTTP |
+| `tests/screenshots.mjs` | Playwright screenshots of the main pages at 390 and 1440 pixels, light and dark, with layout assertions |
 | `.github/workflows/deploy.yml` | Smoke test, release and push to Docker Hub, zizmor and dependency review on pull requests |
 | `.github/workflows/scan.yml` | Daily Trivy scan of `vinado/gitweb:1` |
 | `.github/dependabot.yml` | Weekly updates of Docker and actions with seven days of cooldown |
@@ -25,6 +26,30 @@ nix shell nixpkgs#zizmor --command zizmor .github/workflows/
 
 The image exists for `linux/arm64` only. `smoke.sh` listens on port `28080`, override it with `SMOKE_PORT`. Fetch
 missing tools ad hoc with `nix shell nixpkgs#<tool>`.
+
+`tests/screenshots.mjs` needs a running container with real repositories mounted, a Playwright installation outside
+the repository and these environment variables. The script names no repositories itself:
+
+```sh
+GITWEB_URL=http://127.0.0.1:28090 \
+PLAYWRIGHT_MODULE=/path/to/node_modules/playwright/index.mjs \
+GW_TREE_PROJECT=team/app.git GW_TREE_PATH=src/model \
+GW_BLOB_PROJECT=team/tools.git GW_BLOB_PATH=scripts/check.py GW_LONG_BLOB_PATH=config/settings.yml \
+GW_COMMIT_PROJECT=team/app.git GW_COMMIT=1a2b3c4 \
+    node tests/screenshots.mjs /path/to/screenshots
+```
+
+| Variable | Page |
+|-|-|
+| `GW_TREE_PROJECT`, `GW_TREE_PATH` | Tree of a subdirectory |
+| `GW_BLOB_PROJECT`, `GW_BLOB_PATH` | File that `highlight` colors, for example Python or shell, and its history |
+| `GW_LONG_BLOB_PATH` | File in `GW_BLOB_PROJECT` with lines longer than 120 characters |
+| `GW_COMMIT_PROJECT`, `GW_COMMIT` | Summary, heads, log, shortlog, commit and commitdiff, ideally a commit with long lines and removed lines |
+
+At 390 and at 1440 pixels it fails if a page scrolls sideways or if a dark page, code block, added or removed diff
+line or chunk header has a light background. It also fails if the highlighted file keeps its light syntax colors in
+dark mode. Body text must be at least 16 pixels on the phone and at least gitweb's default of 13 pixels on the desktop.
+Look at the screenshots too.
 
 ## Runtime constraints
 
@@ -51,7 +76,12 @@ missing tools ad hoc with `nix shell nixpkgs#<tool>`.
 - The page loads nothing from other hosts. `avatar` is off to avoid Gravatar, and `$logo_url` points to `/`, so no link
   leaves the site either. The smoke test checks for absolute URLs.
 - User `git` has the same UID as the owner of the repositories. Git otherwise rejects them as "dubious ownership".
-- `static/theme.css` is empty on purpose. A later change fills it. `gitweb.conf` already links it.
+- `static/theme.css` is plain CSS and only overrides `gitweb.css`, so gitweb updates keep working. Colors, spacing,
+  sizes and fonts are custom properties on `:root`. The rules contain no literal colors, lengths or font sizes. Dark
+  mode redefines the colors under `prefers-color-scheme` without a toggle. Syntax colors target `.hl.<class>`, because
+  `highlight` emits `<span class="hl …">` and `gitweb.css` styles the bare classes.
+- On phones the shortlog, history, search, heads, tags and diff file lists are laid out as grid or flex rows. Chromium
+  then exposes those tables as layout tables without cells, which is accepted because they have no header row anyway.
 
 ## Site file
 

@@ -1,6 +1,7 @@
 # gitweb
 
-A read-only web view of bare Git repositories. The image runs gitweb behind lighttpd, with syntax highlighting.
+A read-only web view of bare Git repositories. The image runs gitweb behind lighttpd, with syntax highlighting and a
+theme for phones, desktop and dark mode.
 
 ## Usage
 
