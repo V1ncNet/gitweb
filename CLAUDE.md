@@ -116,8 +116,8 @@ Look at the screenshots too.
 
 - Every push to `main` releases the next patch version. The label `release:minor` or `release:major` on the merged
   pull request raises that part and resets the lower ones to 0.
-- Pushes that only touch `README.md`, `.github/workflows/scan.yml` or `.github/dependabot.yml` do not release (the
-  `paths-ignore` of `deploy.yml`). Every other push to `main` does, including pushes that only touch `CLAUDE.md` or
+- Pushes that only touch `README.md`, `CLAUDE.md`, `.github/workflows/scan.yml` or `.github/dependabot.yml` do not
+  release (the `paths-ignore` of `deploy.yml`). Every other push to `main` does, including pushes that only touch
   `tests/`.
 - `deploy.yml` looks up the pull request of the pushed commit and retries up to five times while GitHub has not linked
   it yet. An API error fails the step. Without a pull request the release is a patch.
