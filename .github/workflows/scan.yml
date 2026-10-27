@@ -1,0 +1,56 @@
+name: Scan published image
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      findings: ${{ steps.findings.outputs.count }}
+
+    steps:
+      - name: Scan for fixable high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/arm64
+        with:
+          image-ref: docker.io/vinado/gitweb:1
+          version: v0.76.0
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: json
+          output: trivy.json
+      - name: Fail on findings
+        id: findings
+        run: |
+          count=$(jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0' trivy.json)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          jq -r '.Results[]?.Vulnerabilities[]? | "\(.Severity) \(.VulnerabilityID) \(.PkgName) \(.InstalledVersion) -> \(.FixedVersion)"' trivy.json
+          test "$count" -eq 0
+
+  follow-up:
+    if: always()
+    needs: scan
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+
+    steps:
+      - name: Rebuild the latest release with fixed packages
+        if: needs.scan.outputs.findings != '' && needs.scan.outputs.findings != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: gh workflow run deploy.yml --repo "$REPOSITORY"
+      - name: Keep the scheduled scan enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: gh api -X PUT "repos/$REPOSITORY/actions/workflows/scan.yml/enable"
