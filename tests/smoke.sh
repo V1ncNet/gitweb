@@ -26,7 +26,9 @@ create_repository() {
     git -c init.defaultBranch=main init -q "$source"
     printf 'def hello():\n    return "world"\n' >"$source/hello.py"
     printf '<script>alert(1)</script>\n' >"$source/page.html"
-    git -C "$source" add hello.py page.html
+    printf 'export const hello = (): string => "world";\n' >"$source/hello.ts"
+    printf 'FROM alpine\nRUN echo hello\n' >"$source/Dockerfile"
+    git -C "$source" add hello.py page.html hello.ts Dockerfile
     git -C "$source" -c user.name=Smoke -c user.email=smoke@example.invalid commit -q -m Smoke
     mkdir -p "$(dirname "$repos/$path")"
     git clone -q --bare "$source" "$repos/$path"
@@ -75,6 +77,9 @@ grep -q '<title>Smoke Site</title>' <<<"$index" || fail "site name from site fil
 
 blob=$(fetch '?p=team/nested.git;a=blob;f=hello.py')
 grep -q '<span class="hl ' <<<"$blob" || fail "no highlighted code"
+for file in hello.ts Dockerfile; do
+    fetch "?p=team/nested.git;a=blob;f=$file" | grep -q '<span class="hl ' || fail "$file not highlighted"
+done
 
 grep -q '<meta name="viewport"' <<<"$index" || fail "no viewport meta"
 grep -q 'theme.css' <<<"$index" || fail "no theme.css link"
