@@ -15,7 +15,7 @@ Guidance for coding agents working in this repository. The README covers what th
 | `tests/screenshots.mjs` | Playwright screenshots of the main pages at 390 and 1440 pixels, light and dark, with layout assertions |
 | `.github/workflows/deploy.yml` | Smoke test, release and push to Docker Hub, zizmor and dependency review on pull requests |
 | `.github/workflows/scan.yml` | Daily Trivy scan of `vinado/gitweb:1` |
-| `.github/dependabot.yml` | Weekly updates of Docker and actions with seven days of cooldown |
+| `.github/dependabot.yml` | Weekly updates of Docker and actions with seven days of cooldown, grouped into one pull request per ecosystem because every merge to `main` releases |
 
 ## Testing locally
 
