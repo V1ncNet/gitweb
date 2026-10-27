@@ -6,9 +6,10 @@ Guidance for coding agents working in this repository. The README covers what th
 
 | Path | Purpose |
 |-|-|
-| `Dockerfile` | Alpine with `git-gitweb`, `highlight`, `lighttpd` and `perl-cgi`. Creates user `git` (1001:1001) and patches `gitweb.cgi` |
+| `Dockerfile` | Alpine with `git-gitweb`, `highlight`, `lighttpd` and `perl-cgi`. Creates user `git` (1001:1001), patches `gitweb.cgi` and generates `/etc/gitweb-highlight.pl` |
 | `lighttpd.conf` | Serves `gitweb.cgi` as CGI on port 8080 and static files from the document root `/usr/share/gitweb`, logs to `stderr` |
-| `gitweb.conf` | Installed as `/etc/gitweb.conf`, which gitweb reads by default. Sets project root, neutral site name, stylesheet, `$prevent_xss` and features, then loads the optional site file |
+| `gitweb.conf` | Installed as `/etc/gitweb.conf`, which gitweb reads by default. Sets project root, neutral site name, stylesheet, `$prevent_xss` and features, then loads the generated highlight map and the optional site file |
+| `highlight-types.pl` | Runs during the build and prints `%highlight_ext` and `%highlight_basename` entries for every syntax the installed `highlight` knows |
 | `static/theme.css` | Installed as `/usr/share/gitweb/static/theme.css`, served at `/static/theme.css`. Layout for phones and desktop plus dark mode on top of gitweb's own stylesheet |
 | `tests/smoke.sh` | Starts the image like the pod does, without and with a site file, and checks pages of two bare repositories over HTTP |
 | `tests/screenshots.mjs` | Playwright screenshots of the main pages at 390 and 1440 pixels, light and dark, with layout assertions |
@@ -82,20 +83,31 @@ Look at the screenshots too.
   `highlight` emits `<span class="hl …">` and `gitweb.css` styles the bare classes.
 - On phones the shortlog, history, search, heads, tags and diff file lists are laid out as grid or flex rows. Chromium
   then exposes those tables as layout tables without cells, which is accepted because they have no header row anyway.
+- gitweb's built-in `%highlight_ext` only knows a few old file types, so `.ts`, `.rs`, `.yml` and many more stayed
+  plain. `highlight-types.pl` reads `highlight --list-scripts=langs` during the build, because that list already
+  resolves extensions claimed by several languages the way the `highlight` CLI does. The first language that claims an
+  extension wins, so `.ms`, `.pas` and `.v` go to MiniScript, Delphi and Verilog as on the CLI. A language name maps to
+  itself only where no other language claims it as an extension. `.make` maps to `makefile`. `txt` and `text` stay
+  plain. Basenames come from the `Filenames` entries of `/etc/highlight/filetypes.conf` plus `Dockerfile`,
+  `Containerfile`, `Jenkinsfile` and the Makefile names. gitweb's own `Makefile => 'make'` points to a syntax that
+  `highlight` 4 no longer has. Generating at build time keeps the request path free of extra work and follows
+  `highlight` upgrades automatically. The build fails if TypeScript is missing from the list or if `filetypes.conf`
+  yields no `Filenames`. The smoke test checks `hello.ts` and a `Dockerfile`.
 
 ## Site file
 
 - The image contains no deployment details. `gitweb.conf` sets the site name "gitweb" and no clone URL base, so
   without a site file the summary page shows no clone link.
-- `gitweb.conf` ends by evaluating `/etc/gitweb.d/site.conf` with Perl's `do` if the file exists. It can set or
-  override any gitweb variable, typically `$site_name` and `@git_base_url_list`. In Kubernetes a ConfigMap is mounted
-  there.
+- `gitweb.conf` ends by evaluating `/etc/gitweb.d/site.conf` with Perl's `do` if the file exists, after the generated
+  highlight map. It can set or override any gitweb variable, typically `$site_name` and `@git_base_url_list`, and
+  also entries of the highlight map. In Kubernetes a ConfigMap is mounted there.
 - A syntax error or an unreadable file makes gitweb show its page "500 - Internal Server Error" with the Perl message
   instead of serving the defaults silently. gitweb still answers with HTTP status 200, so the deployment has to catch
   a broken file itself, for example with `perl -c` on the ConfigMap or an exec probe that greps the page.
 - gitweb's `read_config_file` dies on a set `$!` after evaluating `/etc/gitweb.conf`, before it looks at `$@`. The `-e`
-  test leaves `ENOENT` in `$!` when the file is missing, and `do` can leave a stale value. `gitweb.conf` therefore
-  collects the error first, resets `$!` and only then dies, so the message naming the site file comes through.
+  test leaves `ENOENT` in `$!` when the file is missing, and `do` can leave a stale value. `include_config_file` in
+  `gitweb.conf` therefore collects the error first, resets `$!` and only then dies, so the message naming the file
+  comes through.
 - `tests/smoke.sh` checks the default site name and the missing clone link without a site file. With a broken site
   file it expects the error page and the file name. With its own valid site file it checks the site name and the exact
   clone link `git@example.org:team/nested.git`.

@@ -6,6 +6,9 @@ RUN apk add --no-cache git-gitweb highlight lighttpd perl-cgi \
     && sed -i 's|map { "\$_/\$project" }|map { "\$_\$project" }|' /usr/share/gitweb/gitweb.cgi \
     && grep -qF 'map { "$_$project" }' /usr/share/gitweb/gitweb.cgi
 
+RUN --mount=type=bind,source=highlight-types.pl,target=/tmp/highlight-types.pl \
+    perl /tmp/highlight-types.pl >/etc/gitweb-highlight.pl
+
 COPY lighttpd.conf /etc/lighttpd/lighttpd.conf
 COPY gitweb.conf /etc/gitweb.conf
 COPY static/theme.css /usr/share/gitweb/static/theme.css
