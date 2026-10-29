@@ -127,10 +127,14 @@ Look at the screenshots too.
   the commit `v<version>`. `latest` comes from the default flavor `latest=auto` of the docker metadata action, which
   also omits the `<major>` tag while the major version is 0. The first pull request carries `release:major`, so
   `v1.0.0` and the tag `1` exist when `scan.yml` reaches `main`.
-- `scan.yml` fails on fixable high or critical findings and starts `deploy.yml` by `workflow_dispatch`, which rebuilds
-  the latest tag with fixed Alpine packages. A scan error fails the run without a rebuild. The `follow-up` job
-  re-enables `scan.yml` on every run, so GitHub does not disable it after 60 days without commits. It needs
-  `actions: write` for that.
+- `scan.yml` fails on fixable high or critical findings and sorts them by the Trivy result class. Findings of class
+  `os-pkgs` start `deploy.yml` by `workflow_dispatch`, which rebuilds the latest tag with fixed Alpine packages. Every
+  other finding, such as one in a language package (`lang-pkgs`), survives a rebuild. The `scan` job opens the issue
+  "Vulnerabilities a rebuild cannot fix" for those, listing CVE, package, installed and fixed version. It needs
+  `issues: write` for that. At most one such issue is open. A later scan updates it and closes it once no finding
+  outside `os-pkgs` remains. A mixed result starts the rebuild and updates the issue. A scan error fails the run
+  without a rebuild and leaves the issue as it is. The `follow-up` job re-enables `scan.yml` on every run, so GitHub
+  does not disable it after 60 days without commits. It needs `actions: write` for that.
 
 ## Conventions
 
