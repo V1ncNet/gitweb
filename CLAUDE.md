@@ -93,6 +93,8 @@ Look at the screenshots too.
   `highlight` 4 no longer has. Generating at build time keeps the request path free of extra work and follows
   `highlight` upgrades automatically. The build fails if TypeScript is missing from the list or if `filetypes.conf`
   yields no `Filenames`. The smoke test checks `hello.ts` and a `Dockerfile`.
+- The `Dockerfile` runs `apk upgrade` before `apk add`, so a rebuild picks up fixed versions of packages the base image
+  already ships, such as `libcrypto3` and `musl`.
 
 ## Site file
 
