@@ -12,8 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: write
     outputs:
-      findings: ${{ steps.findings.outputs.count }}
+      os: ${{ steps.classify.outputs.os }}
 
     steps:
       - name: Scan for fixable high and critical vulnerabilities
@@ -27,13 +28,46 @@ jobs:
           ignore-unfixed: true
           format: json
           output: trivy.json
-      - name: Fail on findings
-        id: findings
+      - name: Classify findings
+        id: classify
         run: |
-          count=$(jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0' trivy.json)
-          echo "count=$count" >> "$GITHUB_OUTPUT"
-          jq -r '.Results[]?.Vulnerabilities[]? | "\(.Severity) \(.VulnerabilityID) \(.PkgName) \(.InstalledVersion) -> \(.FixedVersion)"' trivy.json
-          test "$count" -eq 0
+          os=$(jq '[.Results[]? | select(.Class == "os-pkgs") | .Vulnerabilities // [] | length] | add // 0' trivy.json)
+          other=$(jq '[.Results[]? | select(.Class != "os-pkgs") | .Vulnerabilities // [] | length] | add // 0' trivy.json)
+          echo "os=$os" >> "$GITHUB_OUTPUT"
+          echo "other=$other" >> "$GITHUB_OUTPUT"
+          jq -r '.Results[]? | .Class as $class | .Vulnerabilities[]? | "\($class) \(.Severity) \(.VulnerabilityID) \(.PkgName) \(.InstalledVersion) -> \(.FixedVersion)"' trivy.json
+      - name: Maintain issue for findings a rebuild cannot fix
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          OTHER: ${{ steps.classify.outputs.other }}
+          TITLE: Vulnerabilities a rebuild cannot fix
+        run: |
+          number=$(gh issue list --repo "$REPOSITORY" --state open --search "$TITLE in:title" --json number,title \
+            --jq '[.[] | select(.title == env.TITLE) | .number][0] // empty')
+          if [ "$OTHER" -eq 0 ]; then
+            if [ -n "$number" ]; then
+              gh issue close "$number" --repo "$REPOSITORY" --comment "The latest scan found no such vulnerabilities."
+            fi
+            exit 0
+          fi
+          {
+            echo "The scan of the published image found fixable high or critical vulnerabilities that a rebuild does not fix. Update the affected dependency and release."
+            echo
+            echo "| CVE | Severity | Package | Installed | Fixed |"
+            echo "|-|-|-|-|-|"
+            jq -r '.Results[]? | select(.Class != "os-pkgs") | .Vulnerabilities[]? | "| \(.VulnerabilityID) | \(.Severity) | \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion) |"' trivy.json
+          } > body.md
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --repo "$REPOSITORY" --body-file body.md
+          else
+            gh issue create --repo "$REPOSITORY" --title "$TITLE" --body-file body.md
+          fi
+      - name: Fail on findings
+        env:
+          OS: ${{ steps.classify.outputs.os }}
+          OTHER: ${{ steps.classify.outputs.other }}
+        run: test $((OS + OTHER)) -eq 0
 
   follow-up:
     if: always()
@@ -44,7 +78,7 @@ jobs:
 
     steps:
       - name: Rebuild the latest release with fixed packages
-        if: needs.scan.outputs.findings != '' && needs.scan.outputs.findings != '0'
+        if: needs.scan.outputs.os != '' && needs.scan.outputs.os != '0'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
