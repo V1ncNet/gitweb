@@ -1,0 +1,229 @@
+--- a/gitweb.cgi
++++ b/gitweb.cgi
+@@ -82,6 +82,10 @@
+ # this can just be "git" if your webserver has a sensible PATH
+ our $GIT = "/usr/bin/git";
+ 
++# git configuration for the 'signatures' feature, as "key=value" entries
++# that gitweb passes with -c to the git commands verifying signatures
++our @signature_git_config = ();
++
+ # absolute fs-path which will be prepended to the project path
+ #our $projectroot = "/pub/scm";
+ our $projectroot = "/pub/git";
+@@ -544,6 +548,18 @@
+ 		'override' => 0,
+ 		'default' => [0]},
+ 
++	# Verify OpenPGP and SSH signatures of commits and annotated tags
++	# on the commit, commitdiff and tag pages and show the result.
++	# Every check runs gpg or ssh-keygen through git, so list views
++	# do not verify. @signature_git_config configures the programs.
++
++	# To enable system wide have in $GITWEB_CONFIG
++	# $feature{'signatures'}{'default'} = [1];
++	'signatures' => {
++		'sub' => sub { feature_bool('signatures', @_) },
++		'override' => 0,
++		'default' => [0]},
++
+ 	# Enable displaying of remote heads in the heads list
+ 
+ 	# To enable system wide have in $GITWEB_CONFIG
+@@ -3550,6 +3566,8 @@
+ 			} else {
+ 				$co{'committer_name'} = $co{'committer'};
+ 			}
++		} elsif ($line =~ m/^gpgsig(?:-sha256)? (-----BEGIN [A-Z ]+-----)$/) {
++			$co{'signature_format'} //= signature_format($1);
+ 		}
+ 	}
+ 	if (!defined $co{'tree'}) {
+@@ -4592,6 +4610,130 @@
+ 	}
+ }
+ 
++# Maps the first line of an armored signature to the name of its format.
++sub signature_format {
++	my $begin = shift;
++	return 'PGP' if $begin eq '-----BEGIN PGP SIGNATURE-----';
++	return 'SSH' if $begin eq '-----BEGIN SSH SIGNATURE-----';
++	return 'X.509' if $begin eq '-----BEGIN SIGNED MESSAGE-----';
++	return;
++}
++
++# git command with the configuration for signature verification
++sub git_signature_cmd {
++	return git_cmd(), map { ('-c', $_) } @signature_git_config;
++}
++
++# Verifies the signature of a commit parsed by parse_commit. Returns nothing
++# for an unsigned commit, otherwise a hash reference with 'format', 'grade'
++# (%G? of git log), 'signer' and 'key'.
++sub git_get_commit_signature {
++	my $co = shift;
++	return unless $co->{'signature_format'};
++	my %sig = (format => $co->{'signature_format'}, grade => 'E');
++	open my $fd, "-|", git_signature_cmd(), "log", "-1", "--no-show-signature",
++		"--format=%G?%x00%GS%x00%GK%x00%GF", $co->{'id'}, "--"
++		or return \%sig;
++	my $output = do { local $/; <$fd> };
++	close $fd;
++	return \%sig unless defined $output;
++	chomp $output;
++	my ($grade, $signer, $key, $fingerprint) = split /\0/, $output, -1;
++	$sig{'grade'} = $grade if defined $grade && $grade =~ /^[GUBXYRE]$/;
++	$sig{'signer'} = to_utf8($signer) if defined $signer && $signer ne '';
++	$sig{'key'} = (defined $fingerprint && $fingerprint ne '') ? $fingerprint : $key;
++	return \%sig;
++}
++
++# Removes the signature block from the comment of a tag parsed by parse_tag
++# and verifies it with git verify-tag. Returns nothing for an unsigned tag,
++# otherwise a hash reference like git_get_commit_signature.
++sub git_get_tag_signature {
++	my $tag = shift;
++	my $comment = $tag->{'comment'};
++	my ($start, $format);
++	for my $i (0 .. $#$comment) {
++		next unless $comment->[$i] =~ m/^(-----BEGIN [A-Z ]+-----)\r?\n?$/;
++		my $found = signature_format($1) or next;
++		($start, $format) = ($i, $found);
++	}
++	return unless defined $start;
++	splice @$comment, $start;
++
++	my %sig = (format => $format, grade => 'E');
++	# verify-tag writes the raw status of gpg or ssh-keygen to stderr
++	my $pid = open my $fd, "-|";
++	return \%sig unless defined $pid;
++	if (!$pid) {
++		require POSIX;
++		open STDERR, ">&", \*STDOUT;
++		exec(git_signature_cmd(), "verify-tag", "--raw", $tag->{'id'})
++			or POSIX::_exit(127);
++	}
++	my @output = map { chomp; to_utf8($_) } <$fd>;
++	close $fd;
++
++	if ($format eq 'SSH') {
++		# the same parsing as parse_ssh_output in git's gpg-interface.c
++		my $line = $output[0] // '';
++		if ($line =~ m/^Good "git" signature for (.+) with \S+ key (\S+)$/) {
++			@sig{'grade', 'signer', 'key'} = ('G', $1, $2);
++		} elsif ($line =~ m/^Good "git" signature with \S+ key (\S+)$/) {
++			@sig{'grade', 'key'} = ('U', $1);
++		} else {
++			$sig{'grade'} = 'B';
++		}
++		return \%sig;
++	}
++
++	# the same parsing as parse_gpg_output in git's gpg-interface.c
++	my %grades = (GOODSIG => 'G', BADSIG => 'B', ERRSIG => 'E',
++	              EXPSIG => 'X', EXPKEYSIG => 'Y', REVKEYSIG => 'R');
++	my ($seen, $trust) = (0, 'UNDEFINED');
++	foreach my $line (@output) {
++		if ($line =~ m/^\[GNUPG:\] (GOODSIG|BADSIG|ERRSIG|EXPSIG|EXPKEYSIG|REVKEYSIG) (\S+)(?: (.*))?$/) {
++			return { format => $format, grade => 'E' } if $seen++;
++			$sig{'grade'} = $grades{$1};
++			$sig{'key'} = $2;
++			$sig{'signer'} = $3 if defined $3 && $1 ne 'ERRSIG';
++		} elsif ($line =~ m/^\[GNUPG:\] VALIDSIG (\S+)/) {
++			$sig{'key'} = $1;
++		} elsif ($line =~ m/^\[GNUPG:\] TRUST_([A-Z]+)/) {
++			$trust = $1;
++		}
++	}
++	$sig{'grade'} = 'U'
++		if $sig{'grade'} eq 'G' && ($trust eq 'UNDEFINED' || $trust eq 'NEVER');
++	return \%sig;
++}
++
++# Outputs a table row with the result of git_get_commit_signature or
++# git_get_tag_signature for the 'commit', 'commitdiff' and 'tag' views.
++sub git_print_signature_row {
++	my $sig = shift or return;
++	my %states = (
++		G => ['valid',   'Good signature'],
++		U => ['unknown', 'Good signature, unknown key'],
++		E => ['unknown', 'Unknown key, not verified'],
++		B => ['bad',     'Bad signature'],
++		X => ['expired', 'Expired signature'],
++		Y => ['expired', 'Expired key'],
++		R => ['expired', 'Revoked key'],
++	);
++	my ($state, $label) = @{$states{$sig->{'grade'}} || $states{'E'}};
++	print "<tr class=\"signature\"><td>signature</td><td>" .
++	      "<span class=\"signature_badge signature_$state\">" .
++	      "<span class=\"signature_format\">" . esc_html($sig->{'format'}) . "</span> " .
++	      esc_html($label) . "</span>";
++	if (defined $sig->{'signer'}) {
++		print " <span class=\"signature_signer\">" . esc_html($sig->{'signer'}) . "</span>";
++	}
++	if (defined $sig->{'key'} && $sig->{'key'} ne '') {
++		print " <span class=\"signature_key\">key " . esc_html($sig->{'key'}) . "</span>";
++	}
++	print "</td></tr>\n";
++}
++
+ sub git_print_page_path {
+ 	my $name = shift;
+ 	my $type = shift;
+@@ -6709,6 +6851,10 @@
+ 	if (! %tag) {
+ 		die_error(404, "Unknown tag object");
+ 	}
++	my $signature;
++	if (gitweb_check_feature('signatures')) {
++		$signature = git_get_tag_signature(\%tag);
++	}
+ 
+ 	my $head = git_get_head_hash($project);
+ 	git_header_html();
+@@ -6726,6 +6872,7 @@
+ 	if (defined($tag{'author'})) {
+ 		git_print_authorship_rows(\%tag, 'author');
+ 	}
++	git_print_signature_row($signature);
+ 	print "</table>\n\n" .
+ 	      "</div>\n";
+ 	print "<div class=\"page_body\">";
+@@ -7582,6 +7729,10 @@
+ 	}
+ 	my $refs = git_get_references();
+ 	my $ref = format_ref_marker($refs, $co{'id'});
++	my $signature;
++	if (gitweb_check_feature('signatures')) {
++		$signature = git_get_commit_signature(\%co);
++	}
+ 
+ 	git_header_html(undef, $expires);
+ 	git_print_page_nav('commit', '',
+@@ -7596,6 +7747,7 @@
+ 	print "<div class=\"title_text\">\n" .
+ 	      "<table class=\"object_header\">\n";
+ 	git_print_authorship_rows(\%co);
++	git_print_signature_row($signature);
+ 	print "<tr><td>commit</td><td class=\"sha1\">$co{'id'}</td></tr>\n";
+ 	print "<tr>" .
+ 	      "<td>tree</td>" .
+@@ -7999,6 +8151,10 @@
+ 	if ($format eq 'html') {
+ 		my $refs = git_get_references();
+ 		my $ref = format_ref_marker($refs, $co{'id'});
++		my $signature;
++		if (gitweb_check_feature('signatures')) {
++			$signature = git_get_commit_signature(\%co);
++		}
+ 
+ 		git_header_html(undef, $expires);
+ 		git_print_page_nav('commitdiff','', $hash,$co{'tree'},$hash, $formats_nav);
+@@ -8006,6 +8162,7 @@
+ 		print "<div class=\"title_text\">\n" .
+ 		      "<table class=\"object_header\">\n";
+ 		git_print_authorship_rows(\%co);
++		git_print_signature_row($signature);
+ 		print "</table>".
+ 		      "</div>\n";
+ 		print "<div class=\"page_body\">\n";
