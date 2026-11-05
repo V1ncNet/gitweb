@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs the image like the pod does and checks the web view of two bare repositories.
+# Runs the image like the pod does and checks the web view of bare repositories, including the
+# verification of signed commits and tags. Needs docker, git, curl, gpg and ssh-keygen.
 set -euo pipefail
 
 image=${1:?usage: smoke.sh <image>}
@@ -10,12 +11,19 @@ repos=$work/repositories
 site=$work/site.conf
 broken_site=$work/broken-site.conf
 mime_types=$work/mime.types
+keys=$work/keys
 url=http://127.0.0.1:$port
+
+# Signing settings of the machine running the test, such as commit.gpgsign, must not leak into the repositories.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 cleanup() {
     status=$?
     [ "$status" -eq 0 ] || docker logs "$container" 2>&1 | tail -20
     docker rm -f "$container" >/dev/null 2>&1 || true
+    for home in "$keys"/gnupg-*; do
+        [ -d "$home" ] && GNUPGHOME=$home gpgconf --kill all >/dev/null 2>&1 || true
+    done
     rm -rf "$work"
 }
 trap cleanup EXIT
@@ -35,6 +43,57 @@ create_repository() {
     rm -rf "$source"
 }
 
+# Throwaway keys: a trusted and a foreign one per format. The trusted ones carry markup in the signer.
+create_keys() {
+    mkdir -p "$keys"
+    for name in trusted foreign; do
+        mkdir -m 700 "$keys/gnupg-$name"
+        ssh-keygen -q -t ed25519 -N '' -C "$name" -f "$keys/ssh-$name"
+    done
+    GNUPGHOME=$keys/gnupg-trusted gpg -q --batch --passphrase '' \
+        --quick-gen-key 'Smoke <b>PGP</b> <trusted@example.invalid>' ed25519 sign never 2>/dev/null
+    GNUPGHOME=$keys/gnupg-foreign gpg -q --batch --passphrase '' \
+        --quick-gen-key 'Foreign <foreign@example.invalid>' ed25519 sign never 2>/dev/null
+    GNUPGHOME=$keys/gnupg-trusted gpg --armor --export >"$keys/trusted-keys.asc"
+    printf 'smoke<b>ssh</b>@example.invalid namespaces="git" %s\n' "$(cat "$keys/ssh-trusted.pub")" \
+        >"$keys/allowed_signers"
+    chmod 644 "$keys/trusted-keys.asc" "$keys/allowed_signers"
+}
+
+# signed.git: commits signed with each key plus an unsigned one, and a signed tag per format.
+# Sets commit_<case> and tag_<format> to the object names.
+create_signed_repository() {
+    local source=$work/source-signed
+    git -c init.defaultBranch=main init -q "$source"
+    signed() {
+        local mode=$1 key=$2
+        shift 2
+        if [ "$mode" = pgp ]; then
+            GNUPGHOME=$keys/gnupg-$key git -C "$source" -c user.name=Smoke -c user.email=smoke@example.invalid \
+                -c gpg.format=openpgp -c user.signingkey="$key@example.invalid" "$@"
+        else
+            git -C "$source" -c user.name=Smoke -c user.email=smoke@example.invalid \
+                -c gpg.format=ssh -c user.signingkey="$keys/ssh-$key" "$@"
+        fi
+    }
+    for case in pgp:trusted ssh:trusted none: pgp:foreign ssh:foreign; do
+        IFS=: read -r mode key <<<"$case"
+        if [ "$mode" = none ]; then
+            git -C "$source" -c user.name=Smoke -c user.email=smoke@example.invalid commit -q --allow-empty -m unsigned
+            commit_unsigned=$(git -C "$source" rev-parse HEAD)
+        else
+            signed "$mode" "$key" commit -q -S --allow-empty -m "$mode $key"
+            printf -v "commit_${mode}_$key" '%s' "$(git -C "$source" rev-parse HEAD)"
+        fi
+    done
+    signed pgp trusted tag -s -m 'PGP tag' v-pgp
+    signed ssh trusted tag -s -m 'SSH tag' v-ssh
+    tag_pgp=$(git -C "$source" rev-parse v-pgp)
+    tag_ssh=$(git -C "$source" rev-parse v-ssh)
+    git clone -q --bare "$source" "$repos/signed.git"
+    rm -rf "$source"
+}
+
 start_container() {
     docker rm -f "$container" >/dev/null 2>&1 || true
     docker run -d --name "$container" --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
@@ -50,6 +109,8 @@ fail() { echo "FAIL: $1"; exit 1; }
 
 create_repository top.git
 create_repository team/nested.git
+create_keys
+create_signed_repository
 cat >"$site" <<'EOF'
 our $site_name = "Smoke Site";
 our @git_base_url_list = ('git@example.org:');
@@ -104,5 +165,72 @@ grep -qi '^content-type: text/plain' <<<"$headers" || grep -qi '^content-disposi
     fail "blob_plain serves repository HTML neither as text/plain nor as attachment"
 
 ! docker exec "$container" touch /srv/repositories/x 2>/dev/null || fail "repositories are writable"
+
+# Signatures. page <action> <object> fetches a page of signed.git, badge <html> <state> <format> checks its badge.
+page() { fetch "?p=signed.git;a=$1;h=$2"; }
+badge() { grep -q "<span class=\"signature_badge signature_$2\"><span class=\"signature_format\">$3</span>" <<<"$1"; }
+key_mounts=(-v "$keys/trusted-keys.asc:/etc/gitweb.d/trusted-keys.asc:ro"
+    -v "$keys/allowed_signers:/etc/gitweb.d/allowed_signers:ro")
+printf '#!/bin/sh\ntouch /tmp/verification-ran\nexit 2\n' >"$keys/spy"
+chmod 755 "$keys/spy"
+printf '$feature{"signatures"}{"default"} = [1];\n' >"$work/signatures-on.conf"
+printf '$feature{"signatures"}{"default"} = [0];\n' >"$work/signatures-off.conf"
+chmod 644 "$work/signatures-on.conf" "$work/signatures-off.conf"
+
+# Off by default: no badge, the tag keeps its raw signature block, and neither gpgv nor ssh-keygen runs.
+start_container "${key_mounts[@]}" -v "$keys/spy:/usr/local/bin/gpgv-git:ro" -v "$keys/spy:/usr/bin/ssh-keygen:ro"
+off=""
+for object in "$commit_pgp_trusted" "$commit_ssh_trusted" "$commit_pgp_foreign" "$commit_ssh_foreign"; do
+    off+=$(page commit "$object")$(page commitdiff "$object")
+done
+off+=$(page tag "$tag_pgp")$(page tag "$tag_ssh")
+! grep -q 'signature_\|<td>signature</td>' <<<"$off" || fail "signature shown although the feature is off"
+grep -q 'BEGIN&nbsp;PGP&nbsp;SIGNATURE' <<<"$off" || fail "PGP tag without its signature block although the feature is off"
+grep -q 'BEGIN&nbsp;SSH&nbsp;SIGNATURE' <<<"$off" || fail "SSH tag without its signature block although the feature is off"
+! docker exec "$container" test -e /tmp/verification-ran || fail "verification program ran although the feature is off"
+
+# On through the environment with both key files.
+start_container -e GITWEB_SIGNATURES=1 "${key_mounts[@]}"
+html=$(page commit "$commit_pgp_trusted")
+badge "$html" valid PGP || fail "PGP commit with trusted key not valid"
+grep -q 'Smoke &lt;b&gt;PGP&lt;/b&gt; &lt;trusted@example.invalid&gt;' <<<"$html" || fail "PGP signer missing or not escaped"
+! grep -q '<b>PGP</b>' <<<"$html" || fail "PGP signer not escaped"
+grep -q '<span class="signature_key">key [0-9A-F]\{40\}</span>' <<<"$html" || fail "PGP fingerprint missing"
+badge "$(page commitdiff "$commit_pgp_trusted")" valid PGP || fail "PGP commitdiff with trusted key not valid"
+html=$(page commit "$commit_ssh_trusted")
+badge "$html" valid SSH || fail "SSH commit with trusted key not valid"
+grep -q 'smoke&lt;b&gt;ssh&lt;/b&gt;@example.invalid' <<<"$html" || fail "SSH principal missing or not escaped"
+! grep -q '<b>ssh</b>' <<<"$html" || fail "SSH principal not escaped"
+grep -q '<span class="signature_key">key SHA256:' <<<"$html" || fail "SSH fingerprint missing"
+! grep -q 'signature_' <<<"$(page commit "$commit_unsigned")" || fail "unsigned commit shows a signature"
+badge "$(page commit "$commit_pgp_foreign")" unknown PGP || fail "PGP commit with foreign key not unknown"
+badge "$(page commit "$commit_ssh_foreign")" unknown SSH || fail "SSH commit with foreign key not unknown"
+for format in pgp ssh; do
+    tag_object=tag_$format
+    html=$(page tag "${!tag_object}")
+    badge "$html" valid "${format^^}" || fail "${format^^} tag not valid"
+    grep -q "${format^^}&nbsp;tag" <<<"$html" || fail "${format^^} tag lost its message"
+    ! grep -q 'SIGNATURE-----' <<<"$html" || fail "${format^^} tag still shows its signature block"
+done
+lists=$(fetch '?p=signed.git;a=log')$(fetch '?p=signed.git;a=shortlog')$(fetch '?p=signed.git;a=tags')
+! grep -q 'signature_' <<<"$lists" || fail "list view shows signatures"
+[ -z "$(docker exec "$container" ls /tmp)" ] || fail "verification leaves files in /tmp"
+
+# On through the site file without key files: signed commits and tags have unknown keys, no error page.
+start_container -v "$work/signatures-on.conf:/etc/gitweb.d/site.conf:ro"
+for target in "commit:$commit_pgp_trusted" "commit:$commit_ssh_trusted" "tag:$tag_pgp" "tag:$tag_ssh"; do
+    IFS=: read -r action object <<<"$target"
+    html=$(page "$action" "$object") || fail "$action $object without key files not served"
+    ! grep -q '500 - Internal Server Error' <<<"$html" || fail "$action $object without key files shows an error page"
+    grep -q 'signature_badge signature_unknown' <<<"$html" || fail "$action $object without key files not unknown"
+done
+
+# The site file wins over the environment.
+start_container -e GITWEB_SIGNATURES=1 "${key_mounts[@]}" -v "$work/signatures-off.conf:/etc/gitweb.d/site.conf:ro"
+! grep -q 'signature_' <<<"$(page commit "$commit_pgp_trusted")" || fail "site file does not override GITWEB_SIGNATURES"
+
+start_container -e GITWEB_SIGNATURES=yes
+invalid=$(curl -sS "$url/")
+grep -q 'GITWEB_SIGNATURES must be 0 or 1' <<<"$invalid" || fail "invalid GITWEB_SIGNATURES does not show an error"
 
 echo PASS

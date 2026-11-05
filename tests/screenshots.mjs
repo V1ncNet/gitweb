@@ -16,7 +16,8 @@ mkdirSync(outputDir, { recursive: true });
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright');
 const baseUrl = process.env.GITWEB_URL ?? 'http://127.0.0.1:28080';
-const env = Object.fromEntries(required.map((name) => [name, encodeURIComponent(process.env[name])]));
+const optional = ['GW_SIGNED_PROJECT', 'GW_SIGNED_COMMIT', 'GW_SIGNED_TAG'];
+const env = Object.fromEntries([...required, ...optional].map((name) => [name, encodeURIComponent(process.env[name] ?? '')]));
 
 const pages = {
     projects: '/',
@@ -31,6 +32,13 @@ const pages = {
     commit: `/?p=${env.GW_COMMIT_PROJECT};a=commit;h=${env.GW_COMMIT}`,
     commitdiff: `/?p=${env.GW_COMMIT_PROJECT};a=commitdiff;h=${env.GW_COMMIT}`,
 };
+// Optional: a signed commit and a signed tag, on a container started with the signatures feature.
+if (process.env.GW_SIGNED_PROJECT && process.env.GW_SIGNED_COMMIT) {
+    pages['signed-commit'] = `/?p=${env.GW_SIGNED_PROJECT};a=commit;h=${env.GW_SIGNED_COMMIT}`;
+}
+if (process.env.GW_SIGNED_PROJECT && process.env.GW_SIGNED_TAG) {
+    pages['signed-tag'] = `/?p=${env.GW_SIGNED_PROJECT};a=tag;h=${env.GW_SIGNED_TAG}`;
+}
 const viewports = {
     phone: { width: 390, height: 844, minFontSize: 16 },
     desktop: { width: 1440, height: 900, minFontSize: 13 },
@@ -40,7 +48,10 @@ const darkSelectors = {
     blob: ['div.pre'],
     'blob-long': ['div.pre'],
     commitdiff: ['div.diff.add', 'div.diff.rem', 'div.diff.chunk_header'],
+    'signed-commit': ['span.signature_badge'],
+    'signed-tag': ['span.signature_badge'],
 };
+const badgePages = ['signed-commit', 'signed-tag'];
 const syntaxSelector = '.hl.kwa, .hl.kwb, .hl.kwd, .hl.str, .hl.sng, .hl.num';
 const lightSyntaxColors = {};
 
@@ -67,7 +78,13 @@ function inspect({ selectors, syntaxSelector }) {
         backgrounds[selector] = element ? luminance(element) : null;
     }
     const syntax = document.querySelector(syntaxSelector);
+    const badgeElement = document.querySelector('span.signature_badge');
+    const badge = badgeElement && {
+        right: badgeElement.getBoundingClientRect().right,
+        mark: getComputedStyle(badgeElement, '::before').content,
+    };
     return {
+        badge,
         syntaxColor: syntax ? getComputedStyle(syntax).color : null,
         scrollWidth: document.documentElement.scrollWidth,
         fontSize: parseFloat(getComputedStyle(document.body).fontSize),
@@ -91,6 +108,13 @@ try {
                 const result = await page.evaluate(inspect, { selectors, syntaxSelector });
                 check(result.scrollWidth <= viewport.width, `${label}: page scrolls sideways (${result.scrollWidth}px)`);
                 check(result.fontSize >= minFontSize, `${label}: body font size ${result.fontSize}px`);
+                if (badgePages.includes(pageName)) {
+                    check(result.badge !== null, `${label}: no signature badge`);
+                    check(result.badge === null || result.badge.right <= viewport.width,
+                        `${label}: signature badge ends at ${result.badge?.right}px`);
+                    check(result.badge === null || result.badge.mark !== '' && result.badge.mark !== 'none',
+                        `${label}: signature badge has no mark besides its color`);
+                }
                 if (pageName === 'blob') {
                     check(result.syntaxColor !== null, `${label}: no highlighted token`);
                     if (colorScheme === 'light') lightSyntaxColors[viewportName] = result.syntaxColor;

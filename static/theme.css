@@ -73,6 +73,19 @@
 	--chunk-bg: #f2edf9;
 	--chunk-text: #6a3a9c;
 	--change-bg: #fbf6e3;
+
+	--signature-valid-bg: var(--add-bg);
+	--signature-valid-text: var(--add-text);
+	--signature-valid-mark: "\2713";
+	--signature-unknown-bg: var(--surface);
+	--signature-unknown-text: var(--text);
+	--signature-unknown-mark: "?";
+	--signature-bad-bg: var(--rem-bg);
+	--signature-bad-text: var(--rem-text);
+	--signature-bad-mark: "\2717";
+	--signature-expired-bg: var(--change-bg);
+	--signature-expired-text: var(--syn-function);
+	--signature-expired-mark: "!";
 }
 
 @media (prefers-color-scheme: dark) {
@@ -357,6 +370,65 @@ span.refs span.head {
 span.refs span.tag {
 	color: var(--syn-function);
 	background-color: var(--change-bg);
+}
+
+span.signature_badge {
+	padding: 0 var(--space-3);
+	border: var(--hairline) solid var(--border);
+	border-radius: var(--radius-m);
+	font-size: var(--text-s);
+	white-space: nowrap;
+}
+
+span.signature_badge::before {
+	font-weight: bold;
+}
+
+span.signature_format {
+	font-weight: bold;
+}
+
+span.signature_key {
+	font-family: var(--font-code);
+	font-size: var(--text-s);
+	color: var(--muted);
+	overflow-wrap: anywhere;
+}
+
+span.signature_valid {
+	color: var(--signature-valid-text);
+	background-color: var(--signature-valid-bg);
+}
+
+span.signature_valid::before {
+	content: var(--signature-valid-mark) "\00a0";
+}
+
+span.signature_unknown {
+	color: var(--signature-unknown-text);
+	background-color: var(--signature-unknown-bg);
+}
+
+span.signature_unknown::before {
+	content: var(--signature-unknown-mark) "\00a0";
+}
+
+span.signature_bad {
+	color: var(--signature-bad-text);
+	background-color: var(--signature-bad-bg);
+}
+
+span.signature_bad::before {
+	content: var(--signature-bad-mark) "\00a0";
+}
+
+span.signature_expired {
+	color: var(--signature-expired-text);
+	background-color: var(--signature-expired-bg);
+}
+
+span.signature_expired::before {
+	content: var(--signature-expired-mark) "\00a0";
 }
 
 span.cntrl {
