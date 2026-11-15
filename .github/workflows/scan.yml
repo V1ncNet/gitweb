@@ -17,13 +17,19 @@ jobs:
       os: ${{ steps.classify.outputs.os }}
 
     steps:
+      - name: Find latest release
+        id: release
+        env:
+          REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          tag=$(git ls-remote --tags --refs "$REPOSITORY" 'v*' | cut -d/ -f3 | sort -V | tail -1)
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
       - name: Scan for fixable high and critical vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_PLATFORM: linux/arm64
         with:
-          image-ref: docker.io/vinado/gitweb:1
-          version: v0.76.0
+          image-ref: docker.io/vinado/gitweb:${{ steps.release.outputs.version }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           format: json
